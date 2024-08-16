@@ -1,4 +1,4 @@
-import sys
+import sys,os
 from PIL import Image
 from AES import AES, pad, unpad
 
@@ -15,10 +15,19 @@ def process_image_file(file_path):
         byte_data = bytearray(img.tobytes())
     return bytes(byte_data)
 
-def save_encrypted_data(encrypted_data, file_path):
-    """Salva os dados criptografados em um arquivo."""
-    with open(file_path, 'wb') as file:
-        file.write(encrypted_data)
+def save_encrypted_data(data, file_path):
+    # Separa o caminho e o nome do arquivo
+    dir_name, base_name = os.path.split(file_path)
+    
+    # Adiciona o prefixo ao nome do arquivo
+    new_file_name = 'encrypted_' + base_name
+    
+    # Combina novamente o caminho com o novo nome do arquivo
+    new_file_path = os.path.join(dir_name, new_file_name)
+    
+    # Salva os dados criptografados no novo arquivo
+    with open(new_file_path, 'wb') as file:
+        file.write(data)
 
 def save_decrypted_data(decrypted_data, file_path):
     """Salva os dados descriptografados em um arquivo."""
@@ -57,13 +66,13 @@ def main():
     encrypted_data = aes.encrypt_ctr(data, iv)
 
     # Salva os dados criptografados em um novo arquivo
-    save_encrypted_data(encrypted_data, 'encrypted_' + file_path)
+    save_encrypted_data(encrypted_data, file_path)
 
     # Descriptografa os dados para verificação
     decrypted_data = aes.decrypt_ctr(encrypted_data, iv)
 
     # Salva os dados descriptografados em um novo arquivo
-    save_decrypted_data(decrypted_data, 'decrypted_' + file_path)
+    save_decrypted_data(decrypted_data, file_path)
 
     print(f"Arquivo criptografado salvo como 'encrypted_{file_path}'")
     print(f"Arquivo descriptografado salvo como 'decrypted_{file_path}'")

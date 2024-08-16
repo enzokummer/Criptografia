@@ -1,3 +1,4 @@
+import numpy as np
 
 # S-Box Padrão
 s_box = (
