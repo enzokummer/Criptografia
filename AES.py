@@ -45,24 +45,30 @@ def pad(data, block_size=16):
 def unpad(data, block_size=16):
     padding_len = data[-1]
     if padding_len > block_size:
-        raise ValueError("Invalid padding")
+        raise ValueError("Padding inválido.")
     return data[:-padding_len]
 
 def xor_bytes(a, b):
     return bytes(x ^ y for x, y in zip(a, b))
 
+def inc_counter(ctr):
+    as_int = int.from_bytes(ctr[-4:], byteorder='big')
+    as_int = (as_int + 1) & 0xFFFFFFFF  # Increment only last 32 bits
+    return ctr[:-4] + as_int.to_bytes(4, byteorder='big')
+
 def inc_bytes(b):
-    b = bytearray(b)
-    for i in reversed(range(len(b))):
-        if b[i] != 0xFF:
-            b[i] += 1
+    result = bytearray(b)
+    for i in range(len(b) - 1, -1, -1):
+        if result[i] < 255:
+            result[i] += 1
             break
-        b[i] = 0
-    return bytes(b)
+        result[i] = 0
+    return bytes(result)
 
 class AES:
-    def __init__(self, key):
+    def __init__(self, key, num_rounds):
         self.key = key
+        self.num_rounds = num_rounds
         self.round_keys = self.key_expansion()
 
     def key_expansion(self):
@@ -70,23 +76,19 @@ class AES:
         round_keys = [key[i:i + 4] for i in range(0, len(key), 4)]
         rcon = 1
 
-        while len(round_keys) < 44:
+        while len(round_keys) < 4 * (self.num_rounds + 1):
             temp = round_keys[-1][1:] + [round_keys[-1][0]]
             temp = [s_box[b] for b in temp]
             temp[0] ^= rcon
-            rcon <<= 1
-            rcon &= 0xFF  # Manter rcon dentro de 1 byte
-            
-            # Esta linha foi corrigida para não criar um gerador
-            temp = [round_keys[-4][j] ^ temp[j] for j in range(4)]
-            round_keys.append(temp)
+            rcon = (rcon << 1) ^ (0x11b if rcon & 0x80 else 0)
 
-        # Combine as chaves para formar uma lista única de 176 bytes
+            for i in range(4):
+                temp = [x ^ y for x, y in zip(temp, round_keys[-4])]
+                round_keys.append(temp)
+
         expanded_key = []
         for key in round_keys:
             expanded_key.extend(key)
-        
-        # Divida em rodadas de 16 bytes (4 palavras de 4 bytes)
         return [expanded_key[i:i + 16] for i in range(0, len(expanded_key), 16)]
 
     def sub_bytes(self, state):
@@ -96,110 +98,120 @@ class AES:
         return [s_box_inversa[b] for b in state]
 
     def shift_rows(self, state):
-        state = np.array(state).reshape(4, 4).T
-        for i in range(4):
-            state[:, i] = np.roll(state[:, i], -i)
-        return state.T.flatten()
+        state = np.array(state).reshape(4, 4)
+        for i in range(1, 4):
+            state[i] = np.roll(state[i], -i)
+        return state.flatten()
 
     def inv_shift_rows(self, state):
-        state = np.array(state).reshape(4, 4).T
-        for i in range(4):
-            state[:, i] = np.roll(state[:, i], i)
-        return state.T.flatten()
+        state = np.array(state).reshape(4, 4)
+        for i in range(1, 4):
+            state[i] = np.roll(state[i], i)
+        return state.flatten()
 
     def mix_columns(self, state):
+        def xtime(a):
+            return ((a << 1) ^ 0x1B) & 0xFF if a & 0x80 else a << 1
+
+        def mix_single_column(a):
+            return [
+                xtime(a[0]) ^ a[1] ^ xtime(a[1]) ^ a[2] ^ a[3],
+                a[0] ^ xtime(a[1]) ^ a[2] ^ xtime(a[2]) ^ a[3],
+                a[0] ^ a[1] ^ xtime(a[2]) ^ a[3] ^ xtime(a[3]),
+                a[0] ^ xtime(a[0]) ^ a[1] ^ a[2] ^ xtime(a[3])
+            ]
+
+        state = np.array(state).reshape(4, 4).T
         for i in range(4):
-            column = state[i::4]
-            state[i::4] = self.mix_single_column(column)
-        return state
+            state[:, i] = mix_single_column(state[:, i])
+        return state.T.flatten()
 
     def inv_mix_columns(self, state):
+        def mul_by_9(x):
+            return (x << 3) ^ x & 0xFF
+
+        def mul_by_11(x):
+            return (x << 3) ^ (x << 1) ^ x & 0xFF
+
+        def mul_by_13(x):
+            return (x << 3) ^ (x << 2) ^ x & 0xFF
+
+        def mul_by_14(x):
+            return (x << 3) ^ (x << 2) ^ (x << 1) & 0xFF
+
+        def inv_mix_single_column(a):
+            return [
+                mul_by_14(a[0]) ^ mul_by_11(a[1]) ^ mul_by_13(a[2]) ^ mul_by_9(a[3]),
+                mul_by_9(a[0]) ^ mul_by_14(a[1]) ^ mul_by_11(a[2]) ^ mul_by_13(a[3]),
+                mul_by_13(a[0]) ^ mul_by_9(a[1]) ^ mul_by_14(a[2]) ^ mul_by_11(a[3]),
+                mul_by_11(a[0]) ^ mul_by_13(a[1]) ^ mul_by_9(a[2]) ^ mul_by_14(a[3])
+            ]
+
+        state = np.array(state).reshape(4, 4).T
         for i in range(4):
-            column = state[i::4]
-            state[i::4] = self.inv_mix_single_column(column)
-        return state
-
-    def mix_single_column(self, column):
-        def xtime(x):
-            return ((x << 1) ^ 0x1B) & 0xFF if x & 0x80 else x << 1
-
-        def mix_single_byte(x):
-            return xtime(x) ^ xtime(x) ^ xtime(x) ^ xtime(x)
-
-        return [
-            mix_single_byte(column[0]) ^ xtime(column[1]) ^ column[2] ^ column[3],
-            column[0] ^ mix_single_byte(column[1]) ^ xtime(column[2]) ^ column[3],
-            column[0] ^ column[1] ^ mix_single_byte(column[2]) ^ xtime(column[3]),
-            xtime(column[0]) ^ column[1] ^ column[2] ^ mix_single_byte(column[3])
-        ]
-
-    def inv_mix_single_column(self, column):
-        def xtime(x):
-            return ((x << 1) ^ 0x1B) & 0xFF if x & 0x80 else x << 1
-
-        def inv_mix_single_byte(x):
-            return xtime(x) ^ xtime(x) ^ xtime(x) ^ xtime(x)
-
-        return [
-            inv_mix_single_byte(column[0]) ^ xtime(column[1]) ^ column[2] ^ column[3],
-            column[0] ^ inv_mix_single_byte(column[1]) ^ xtime(column[2]) ^ column[3],
-            column[0] ^ column[1] ^ inv_mix_single_byte(column[2]) ^ xtime(column[3]),
-            xtime(column[0]) ^ column[1] ^ column[2] ^ inv_mix_single_byte(column[3])
-        ]
+            state[:, i] = inv_mix_single_column(state[:, i])
+        return state.T.flatten()
 
     def add_round_key(self, state, round_key):
         return xor_bytes(state, round_key)
 
     def encrypt_block(self, block):
         state = list(block)
-        state = self.add_round_key(state, self.round_keys[0])
+        state = self.initial_round(state)
 
-        for i in range(1, 10):
-            state = self.sub_bytes(state)
-            state = self.shift_rows(state)
-            state = self.mix_columns(state)
-            state = self.add_round_key(state, self.round_keys[i])
+        for i in range(1, self.num_rounds):
+            state = self.encrypt_round(state, self.round_keys[i])
 
-        state = self.sub_bytes(state)
-        state = self.shift_rows(state)
-        state = self.add_round_key(state, self.round_keys[-1])
-
+        state = self.final_round(state, self.round_keys[-1])
         return bytes(state)
 
     def decrypt_block(self, block):
         state = list(block)
         state = self.add_round_key(state, self.round_keys[-1])
 
-        for i in range(9, 0, -1):
-            state = self.inv_shift_rows(state)
-            state = self.inv_sub_bytes(state)
-            state = self.add_round_key(state, self.round_keys[i])
-            state = self.inv_mix_columns(state)
+        for i in range(self.num_rounds - 1, 0, -1):
+            state = self.decrypt_round(state, self.round_keys[i])
 
         state = self.inv_shift_rows(state)
         state = self.inv_sub_bytes(state)
         state = self.add_round_key(state, self.round_keys[0])
-
         return bytes(state)
 
-    def encrypt_ctr(self, plaintext, iv):
-        assert len(iv) == 16
+    def initial_round(self, state):
+        return self.add_round_key(state, self.round_keys[0])
+    
+    def final_round(self, state, round_key):
+        state = self.sub_bytes(state)
+        state = self.shift_rows(state)
+        return self.add_round_key(state, round_key)
+    
+    def encrypt_round(self, state, round_key):
+        state = self.sub_bytes(state)
+        state = self.shift_rows(state)
+        state = self.mix_columns(state)
+        return self.add_round_key(state, round_key)
+    
+    def decrypt_round(self, state, round_key):
+        state = self.inv_shift_rows(state)
+        state = self.inv_sub_bytes(state)
+        state = self.add_round_key(state, round_key)
+        return self.inv_mix_columns(state)
+    
+    def encrypt_ctr(self, plaintext, nonce):
+        assert isinstance(plaintext, bytes), "Plaintext must be a bytes object"
+        assert len(nonce) == 16
+        ciphertext = bytearray()
+        counter = nonce
 
-        plaintext = pad(plaintext)  # Ensure plaintext is padded
-        blocks = []
-        counter = iv  # Initialize counter with the IV
-
-        for plaintext_block in split_blocks(plaintext, require_padding=False):
-            # Encrypt the counter to generate the key stream
+        for i in range(0, len(plaintext), 16):
             key_stream = self.encrypt_block(counter)
-            # XOR plaintext block with key stream to get the ciphertext block
-            ciphertext_block = xor_bytes(plaintext_block, key_stream)
-            blocks.append(ciphertext_block)
-            # Increment the counter for the next block
-            counter = inc_bytes(counter)
+            plaintext_block = plaintext[i:i+16]
+            ciphertext_block = xor_bytes(plaintext_block, key_stream[:len(plaintext_block)])
+            ciphertext.extend(ciphertext_block)
+            counter = inc_counter(counter)
 
-        return b''.join(blocks)
+        return bytes(ciphertext)
 
-    def decrypt_ctr(self, ciphertext, iv):
-        # In CTR mode, encryption and decryption are the same
-        return self.encrypt_ctr(ciphertext, iv)
+    def decrypt_ctr(self, ciphertext, nonce):
+        assert isinstance(ciphertext, bytes), "Ciphertext must be a bytes object"
+        return self.encrypt_ctr(ciphertext, nonce)
